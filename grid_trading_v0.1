@@ -1,0 +1,116 @@
+# This is a test grid trading strategy of ETH on Binance.
+# By yfu1900, 26 July 2021.
+# Contact: snow_go@hotmail.co.uk
+# https://github.com/yfu1900
+# v0.1
+# Python 3.9, MongoDB
+
+import ccxt
+import time
+import pymongo
+
+# 定义交易所API
+ex = ccxt.binance({
+    'apiKey': '', # 填入API
+    'secret': ''
+})
+
+# 连接DB
+db_client = pymongo.MongoClient("mongodb://localhost:27017/")
+db_main = db_client["Binance_Grid"]
+db_col = db_main["ETH/USDT"]
+db_col.drop()
+
+# 初始化等待时间（秒）
+timesleep = 5
+# 定义交易对
+ex_symbol = 'ETH/USDT'
+# 定义初始交易方向
+ex_side = 'sell'
+# 定义交易数额
+ex_amount = 0.01
+# 获取当前报价
+ex_last_price = ex.fetch_ticker(ex_symbol)['last']
+# 初始化挂单价，挂单价等于最新报价
+ex_order_buy_price = ex_last_price
+ex_order_sell_price = ex_last_price
+# 初始化监控挂单价
+ex_price = 0
+# 初始化价差变量
+price_var = 100
+# 初始化计算套利次数的变量
+deal_times = -1
+# 初始挂单数量
+n = 3
+
+# 当前报价分别挂3个卖单，价格相差100，写入数据库；挂3个买单，价格相差100，写入数据库；
+while n>0:
+    ex_order_buy_price -= price_var
+    ex_order_id = ex.create_limit_order(ex_symbol, 'buy', ex_amount, ex_order_buy_price)['info']['orderId']
+    db_list = {
+        'Order ID': ex_order_id,
+        'Price': ex_order_buy_price,
+        'Side': 'buy'
+    }
+    db_col.insert_one(db_list)
+    print('已挂买单，挂单价：', ex_order_buy_price)
+
+    ex_order_sell_price += price_var
+    ex_order_id = ex.create_limit_order(ex_symbol, 'sell', ex_amount, ex_order_sell_price)['info']['orderId']
+    db_list = {
+        'Order ID': ex_order_id,
+        'Price': ex_order_sell_price,
+        'Side': 'sell'
+    }
+    db_col.insert_one(db_list)
+    print('已挂卖单，挂单价：', ex_order_sell_price)
+
+    n -= 1
+while True:
+    print('*' * 5, time.asctime(time.localtime(time.time())), '*' * 5)
+    for i in db_col.find():
+        ex_order_db_id = i['Order ID']
+        ex_order_db_side = i['Side']
+        ex_order_db_price = i['Price']
+        ex_order_db_status = ex.fetch_order_status(ex_order_db_id, ex_symbol)
+        ex_ask_price = ex.fetch_ticker(ex_symbol)['ask']
+        ex_bid_price = ex.fetch_ticker(ex_symbol)['bid']
+        # 判断如果有成交且方向为buy
+        if ex_order_db_status == 'canceled' and ex_order_db_side == 'buy':
+            print('监控到买单成交，开始挂卖单')
+            # 在DB中删除成交订单
+            db_col.delete_one({'Order ID': ex_order_db_id})
+            # 设定挂单价为卖一价 + 价差变量
+            ex_price = ex_ask_price + price_var
+            # 挂单并获取订单ID
+            ex_order_id = ex.create_limit_sell_order(ex_symbol, ex_amount, ex_price)['info']['orderId']
+            # 将挂单信息写入DB
+            db_list = {
+                'Order ID': ex_order_id,
+                'Price': ex_price,
+                'Side': 'sell'
+            }
+            db_col.insert_one(db_list)
+            deal_times += 1
+            print('挂卖单完成，数据库写入完成，挂单价：', ex_price, '套利次数：', deal_times)
+        elif ex_order_db_status == 'canceled' and ex_order_db_side == 'sell':
+            print('监控到卖单成交，开始挂买单')
+            # 在DB中删除成交订单
+            db_col.delete_one({'Order ID': ex_order_db_id})
+            # 设定挂单价为买一价 - 价差变量
+            ex_price = ex_bid_price - price_var
+            # 挂单并获取订单ID
+            ex_order_id = ex.create_limit_buy_order(ex_symbol, ex_amount, ex_price)['info']['orderId']
+            # 将挂单信息写入DB
+            db_list = {
+                'Order ID': ex_order_id,
+                'Price': ex_price,
+                'Side': 'buy'
+            }
+            db_col.insert_one(db_list)
+            deal_times += 1
+            print('挂买单完成，数据库写入完成，挂单价', ex_price, '套利次数：', deal_times)
+    print('持续监控中...')
+    time.sleep(timesleep)
+
+
